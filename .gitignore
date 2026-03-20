@@ -1,0 +1,35 @@
+# Dependency directories
+/node_modules/
+/vendor/bundle/
+
+# RubyGems logs and built gems
+*.gem
+/pkg/
+*.log
+
+# Temporary files
+/tmp/
+/db/*.sqlite3
+/db/*.sqlite3-journal
+
+# IDE and OS files
+.DS_Store
+.vscode/
+.idea/
+.serverrc
+
+# EksaServer Heartbeats (Internal)
+/tmp/eksa_hb/
+
+# Example Project
+examples/
+
+# Documentation Project
+public/
+
+# Configuration files
+eksa-server.gemspec
+eksa-server-1.0.0.gem
+Gemfile.lock
+Gemfile
+docs_config.ru

@@ -1,0 +1,23 @@
+#!/usr/bin/env ruby
+# bin/eksa-server
+
+require 'optparse'
+require_relative '../server'
+
+options = {}
+OptionParser.new do |opts|
+  opts.banner = "Usage: eksa-server [options] [config.ru]"
+
+  opts.on("-p", "--port PORT", "Port to bind to (default: 3000)") { |v| options[:port] = v.to_i }
+  opts.on("-w", "--workers COUNT", "Number of worker processes") { |v| options[:workers] = v.to_i }
+  opts.on("-C", "--config PATH", "Path to config file") { |v| options[:config_file] = v }
+end.parse!
+
+app_path = ARGV[0] || "config.ru"
+unless File.exist?(app_path)
+  puts "\e[31mError: File #{app_path} tidak ditemukan.\e[0m"
+  exit 1
+end
+
+server = EksaServerCore.new(app_path, options)
+server.start
