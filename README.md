@@ -17,7 +17,7 @@
 Tambahkan baris ini ke Gemfile aplikasi Anda:
 
 ```ruby
-gem 'eksa_server'
+gem 'eksa-server'
 ```
 
 Lalu jalankan:
@@ -29,7 +29,7 @@ bundle install
 Atau instal langsung melalui terminal:
 
 ```bash
-gem install eksa_server
+gem install eksa-server
 ```
 
 ## Penggunaan Cepat
