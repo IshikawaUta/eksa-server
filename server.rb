@@ -5,6 +5,7 @@ require 'thread'
 require 'json'
 require 'fileutils'
 require 'openssl'
+require 'stringio'
 require 'rack'
 require 'rackup'
 
@@ -13,15 +14,40 @@ require_relative 'lib/eksa_server/events'
 require_relative 'lib/eksa_server/binder'
 require_relative 'lib/eksa_server/thread_pool'
 require_relative 'lib/eksa_server/configuration'
+require_relative 'lib/eksa_server/http'
+require_relative 'lib/eksa_server/version'
 
 class EksaServerCore
-  def initialize(app, config = {})
-    @app_path_or_obj = app
-    @config = EksaServer::Configuration.new(config)
+  def initialize(app, user_options = {})
+    @app_path_or_obj = app.is_a?(String) ? File.expand_path(app) : app
+    @config = EksaServer::Configuration.new
+    @signal_queue = []
+    @project_root = Dir.pwd
     
-    # Load optional config file
+    # 1. Load optional config file (priority paling rendah)
     if File.exist?('config/eksa_server.rb')
       @config.load_config('config/eksa_server.rb')
+    end
+
+    # 2. Muat .env (menimpa config file jika ada variabelnya)
+    @config.load_env
+
+    # 3. Gabungkan user_options dari CLI (priority paling tinggi)
+    # Jika user memberikan port/host secara eksplisit di CLI atau ada di ENV,
+    # kita prioritaskan itu dan kosongkan binds agar tidak tumpang tindih.
+    cli_port = user_options[:port] || user_options[:host]
+    if cli_port || ENV['PORT'] || ENV['HOST']
+      @config.options[:binds] = []
+      @config.options[:port] = (user_options[:port] || ENV['PORT'] || @config.options[:port]).to_i
+      @config.options[:host] = user_options[:host] || ENV['HOST'] || @config.options[:host]
+    end
+    @config.merge!(user_options.compact)
+    
+    # Expand paths to absolute versions before load_app changes Dir.chdir
+    [:cert, :key, :log_file].each do |opt|
+      if @config.options[opt] && @config.options[opt].is_a?(String)
+        @config.options[opt] = File.expand_path(@config.options[opt])
+      end
     end
 
     @options = @config.options
@@ -36,6 +62,19 @@ class EksaServerCore
   end
 
   def start
+    if @options[:daemonize]
+      @events.info "Berjalan di latar belakang (Daemon Mode)..."
+      Process.daemon(true, true)
+    end
+
+    if @options[:log_file]
+      log_file = File.open(@options[:log_file], 'a')
+      log_file.sync = true
+      @events.reopen(log_file)
+    end
+
+    start_reloader if @options[:reload]
+
     print_banner
     
     # Bina Sockets (Binder)
@@ -86,13 +125,20 @@ class EksaServerCore
     @options[:workers].times { |i| spawn_worker(i) }
     @events.info "Cluster aktif dengan #{@options[:workers]} worker. 🚀"
 
-    trap('INT') { terminate_all }
-    trap('TERM') { terminate_all }
-    trap('USR2') { phased_restart }
+    trap('INT') { @signal_queue << :TERM }
+    trap('TERM') { @signal_queue << :TERM }
+    trap('USR2') { @signal_queue << :USR2 }
 
     loop do
+      case @signal_queue.shift
+      when :TERM
+        terminate_all
+      when :USR2
+        phased_restart
+      end
+
       check_workers
-      sleep 2
+      sleep 1
     end
   end
 
@@ -120,6 +166,7 @@ class EksaServerCore
 
   def phased_restart
     @events.info "\e[35mMemulai Phased Restart...\e[0m"
+    @app = load_app(@app_path_or_obj)
     @worker_pids.each do |index, pid|
       Process.kill('TERM', pid)
       Process.wait(pid)
@@ -146,19 +193,42 @@ class EksaServerCore
       @selector.register(io, :r).value = :accept
     end
 
+    # Signal handling untuk single-worker mode
+    if @options[:workers] == 0
+      trap('INT') { @signal_queue << :TERM }
+      trap('TERM') { @signal_queue << :TERM }
+    end
+
     Thread.new do
       loop do
-        FileUtils.touch("#{@hb_dir}/#{Process.pid}.hb")
+        begin
+          if File.directory?(@hb_dir)
+            FileUtils.touch("#{@hb_dir}/#{Process.pid}.hb")
+          end
+        rescue
+          # Abaikan error saat shutdown
+        end
         sleep 5
       end
     end
 
     loop do
-      @selector.select(5) do |monitor|
+      if @signal_queue.include?(:TERM)
+        @events.info "Worker #{id} berhenti..."
+        break
+      end
+
+      @selector.select(1) do |monitor|
         if monitor.value == :accept
           begin
-            client = monitor.io.accept_nonblock
+            if monitor.io.respond_to?(:accept_nonblock)
+              client = monitor.io.accept_nonblock
+            else
+              client = monitor.io.accept
+            end
             @selector.register(client, :r).value = :read
+          rescue OpenSSL::SSL::SSLError, Errno::ECONNRESET => e
+            @events.warn "Gagal jabat tangan SSL/Koneksi terputus: #{e.message}"
           rescue IO::WaitReadable
           end
         else
@@ -175,36 +245,9 @@ class EksaServerCore
   end
 
   def process_client(client)
-    # Baca request line & headers
-    lines = []
-    while (line = client.gets) && line != "\r\n"
-      lines << line.chomp
-    end
-    return client.close if lines.empty?
-
-    method, path, _version = lines.first.split(" ")
-    headers = lines[1..-1].each_with_object({}) do |line, h|
-      k, v = line.split(": ", 2)
-      h[k] = v
-    end
-
-    env = {
-      'REQUEST_METHOD'    => method,
-      'SCRIPT_NAME'       => '',
-      'PATH_INFO'         => path.split("?", 2)[0],
-      'QUERY_STRING'      => path.split("?", 2)[1] || "",
-      'SERVER_NAME'       => @options[:host],
-      'SERVER_PORT'       => @options[:port].to_s,
-      'rack.version'      => Rack::VERSION,
-      'rack.url_scheme'   => @options[:ssl] ? 'https' : 'http',
-      'rack.input'        => StringIO.new(""),
-      'rack.errors'       => $stderr,
-      'rack.multithread'  => true,
-      'rack.multiprocess' => @options[:workers] > 0,
-      'rack.run_once'     => false
-    }
-
-    headers.each { |k, v| env["HTTP_#{k.upcase.gsub('-', '_')}"] = v }
+    request = EksaServer::Request.new(client, @options)
+    env = request.env
+    return client.close unless env
 
     # Panggil aplikasi Rack
     begin
@@ -216,20 +259,10 @@ class EksaServerCore
       res_body = [render_error_page(e)]
     end
     
-    # Send Response
-    response = "HTTP/1.1 #{status} OK\r\n"
-    res_headers.each { |k, v| response << "#{k}: #{v}\r\n" }
+    # Kirim Response
+    EksaServer::Response.send_response(client, status, res_headers, res_body)
     
-    full_body = ""
-    res_body = [res_body] unless res_body.respond_to?(:each)
-    res_body.each { |chunk| full_body << chunk }
-    res_body.close if res_body.respond_to?(:close)
-
-    response << "Content-Length: #{full_body.bytesize}\r\n\r\n"
-    response << full_body
-
-    client.write(response)
-    @events.info "Selesai: #{method} #{path} -> #{status} (Threads: #{@thread_pool.spawned})"
+    @events.info "Selesai: #{env['REQUEST_METHOD']} #{env['PATH_INFO']} -> #{status} (Threads: #{@thread_pool.spawned})"
     client.close
   rescue => e
     @events.error "Kesalahan tingkat rendah: #{e.message}"
@@ -248,20 +281,66 @@ class EksaServerCore
     end
   end
 
+  def start_reloader
+    @events.info "Pemuatan otomatis (Auto-Reload) aktif. 👀"
+    Thread.new do
+      # Pantau file di project root agar mencakup lib dan server.rb
+      loop do
+        sleep 2
+        changed = false
+        files = Dir.chdir(@project_root) { Dir["**/*.{rb,ru}"] }
+        
+        @mtimes ||= {}
+        files.each do |f|
+          full_path = File.join(@project_root, f)
+          current_mtime = File.mtime(full_path) rescue next
+          if @mtimes[f] && @mtimes[f] != current_mtime
+            @events.warn "Perubahan terdeteksi di #{f}. Me-restart..."
+            changed = true
+          end
+          @mtimes[f] = current_mtime
+        end
+
+        if changed
+          if @options[:workers] > 0
+            @signal_queue << :USR2
+          else
+            @signal_queue << :TERM
+          end
+        end
+      end
+    end
+  end
+
   def start_control_server
+    return if @options[:control_port] == false || @options[:control_port] == nil
     start_time = Time.now
     Thread.new do
       begin
+        # Jika port 0, OS akan memilih port acak
         server = TCPServer.new('127.0.0.1', @options[:control_port])
+        actual_port = server.addr[1]
+        @events.info "Control Server aktif di http://localhost:#{actual_port}" if @options[:control_port] == 0
+        
         loop do
           client = server.accept
           uptime = (Time.now - start_time).to_i
-          stats = { workers: @worker_pids.size, uptime: uptime }.to_json
+          
+          # Hitung memori (RSS) di Linux
+          mem = `ps -o rss= -p #{Process.pid}`.strip.to_i rescue 0
+          
+          stats = { 
+            workers: @worker_pids.size, 
+            uptime: uptime,
+            version: EksaServer::VERSION,
+            memory_kb: mem,
+            threads: { spawned: @thread_pool&.spawned, waiting: @thread_pool&.waiting }
+          }.to_json
           client.puts "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n#{stats}"
           client.close
         end
       rescue => e
-        @events.error "Control Server Gagal: #{e.message}"
+        @events.error "Control Server Gagal di port #{@options[:control_port]}: #{e.message}"
       end
     end
   end
@@ -273,7 +352,7 @@ class EksaServerCore
 
   def print_banner
     puts "\e[34m"
-    puts "  \e[1mEKSA SERVER v2 \e[0m- \e[90mBy: IshikawaUta\e[0m"
+    puts "  \e[1mEKSA SERVER v#{EksaServer::VERSION} \e[0m- \e[90mBy: IshikawaUta\e[0m"
     puts "\e[34m"
     puts "  ╔═╗╦╔═╔═╗╔═╗  ╔═╗╔═╗╦═╗╦   ╦╔═╗╦═╗"
     puts "  ║╣ ╠╩╗╚═╗╠═╣  ╚═╗║╣ ╠╦╝╚╗ ╔╝║╣ ╠╦╝"
@@ -285,7 +364,9 @@ class EksaServerCore
   def print_server_info
     puts "\n  \e[1mKONFIGURASI SERVER:\e[0m"
     @binder.listeners.each do |io, type|
-       puts "  \e[36m•\e[0m Bind [#{type.upcase}]: \e[33m#{io.local_address.inspect_sockaddr}\e[0m"
+       # SSLServer tidak punya local_address langsung, panggil to_io
+       sock = io.respond_to?(:local_address) ? io : io.to_io
+       puts "  \e[36m•\e[0m Bind [#{type.upcase}]: \e[33m#{sock.local_address.inspect_sockaddr}\e[0m"
     end
     puts "  \e[36m•\e[0m Threads: \e[33m#{@options[:min_threads]}..#{@options[:max_threads]}\e[0m"
     puts "  \e[36m•\e[0m Workers: \e[33m#{@options[:workers]} (#{@options[:workers] > 0 ? 'Cluster' : 'Single'} Mode)\e[0m"

@@ -33,18 +33,20 @@ module EksaServer
     private
 
     def spawn_thread
-      @spawned += 1
-      thread = Thread.new do
-        loop do
-          @mutex.synchronize { @waiting += 1 }
-          work = @todo.pop
-          @mutex.synchronize { @waiting -= 1 }
-          break if work == :exit
-          @block.call(work) rescue nil
+      @mutex.synchronize do
+        @spawned += 1
+        thread = Thread.new do
+          loop do
+            @mutex.synchronize { @waiting += 1 }
+            work = @todo.pop
+            @mutex.synchronize { @waiting -= 1 }
+            break if work == :exit
+            @block.call(work) rescue nil
+          end
+          @mutex.synchronize { @spawned -= 1 }
         end
-        @mutex.synchronize { @spawned -= 1 }
+        @pool << thread
       end
-      @pool << thread
     end
   end
 end

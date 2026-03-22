@@ -29,6 +29,11 @@ module EksaServer
       @stdout.puts msg
     end
 
+    def reopen(io)
+      @stdout = io
+      @logger = setup_logger
+    end
+
     private
 
     def setup_logger

@@ -9,7 +9,21 @@ OptionParser.new do |opts|
   opts.banner = "Usage: eksa-server [options] [config.ru]"
 
   opts.on("-p", "--port PORT", "Port to bind to (default: 3000)") { |v| options[:port] = v.to_i }
+  opts.on("-o", "--host HOST", "Host to bind to (default: 0.0.0.0)") { |v| options[:host] = v }
+  opts.on("-b", "--bind URL", "Bind URL (tcp://host:port or unix://path)") do |v| 
+    options[:binds] ||= []
+    options[:binds] << v
+  end
   opts.on("-w", "--workers COUNT", "Number of worker processes") { |v| options[:workers] = v.to_i }
+  opts.on("-t", "--timeout SECONDS", "Worker timeout in seconds") { |v| options[:timeout] = v.to_i }
+  opts.on("-c", "--control PORT", "Control server port (0 for random, false to disable)") do |v| 
+    options[:control_port] = (v == "false" ? false : v.to_i)
+  end
+  opts.on("-L", "--log PATH", "Path to log file") { |v| options[:log_file] = v }
+  opts.on("-D", "--daemonize", "Run in background") { options[:daemonize] = true }
+  opts.on("-R", "--reload", "Auto-reload on file changes") { options[:reload] = true }
+  opts.on("--ssl-cert PATH", "Path to SSL certificate") { |v| options[:cert] = v; options[:ssl] = true }
+  opts.on("--ssl-key PATH", "Path to SSL private key") { |v| options[:key] = v; options[:ssl] = true }
   opts.on("-C", "--config PATH", "Path to config file") { |v| options[:config_file] = v }
 end.parse!
 

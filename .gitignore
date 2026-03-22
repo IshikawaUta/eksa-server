@@ -1,35 +1,34 @@
 # Dependency directories
 /node_modules/
 /vendor/bundle/
-
-# RubyGems logs and built gems
-*.gem
+/.bundle/
 /pkg/
+
+# RubyGems built gems and logs
+*.gem
 *.log
 
-# Temporary files
+# Temporary and Heartbeat files
 /tmp/
+/tmp/eksa_hb/
+.rb-stats
+
+# Database files
 /db/*.sqlite3
 /db/*.sqlite3-journal
 
-# IDE and OS files
+# IDE, Editor and OS files
 .DS_Store
 .vscode/
 .idea/
+.ruby-lsp/
 .serverrc
+*.swp
+*~
 
-# EksaServer Heartbeats (Internal)
-/tmp/eksa_hb/
+# Sensitive information
+.env
 
-# Example Project
-examples/
-
-# Documentation Project
-public/
-
-# Configuration files
-eksa-server.gemspec
-eksa-server-1.0.0.gem
-Gemfile.lock
-Gemfile
-docs_config.ru
+# Coverage and Docs
+/coverage/
+/rdoc/
