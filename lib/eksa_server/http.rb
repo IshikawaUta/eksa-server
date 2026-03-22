@@ -35,14 +35,26 @@ module EksaServer
         'SERVER_PORT'       => @options[:port].to_s,
         'rack.version'      => Rack::VERSION,
         'rack.url_scheme'   => @options[:ssl] ? 'https' : 'http',
-        'rack.input'        => StringIO.new(""),
         'rack.errors'       => $stderr,
         'rack.multithread'  => true,
         'rack.multiprocess' => @options[:workers] > 0,
         'rack.run_once'     => false
       }
 
-      headers.each { |k, v| env["HTTP_#{k.upcase.gsub('-', '_')}"] = v }
+      headers.each do |k, v|
+        key = k.upcase.gsub('-', '_')
+        if key == 'CONTENT_TYPE' || key == 'CONTENT_LENGTH'
+          env[key] = v
+        else
+          env["HTTP_#{key}"] = v
+        end
+      end
+
+      # Read body if Content-Length is present
+      content_length = env['CONTENT_LENGTH'].to_i
+      body = content_length > 0 ? @client.read(content_length) : ""
+      env['rack.input'] = StringIO.new(body)
+
       env
     end
   end

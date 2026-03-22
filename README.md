@@ -83,7 +83,7 @@ Jika Control Server aktif, Anda bisa memantau kesehatan server via JSON:
 {
   "workers": 2,
   "uptime": 3600,
-  "version": "1.1.0",
+  "version": "1.1.1",
   "memory_kb": 45120,
   "threads": { "spawned": 10, "waiting": 8 }
 }
